@@ -1,0 +1,256 @@
+---
+title: "Statistical Learning Project"
+author: "Ibrahim Bashir"
+date: "9/21/2021"
+output: html_document
+---
+
+```{r libraries, warning=FALSE, message=FALSE,include=FALSE, results = 'hide'}
+library(readr) # For helping us read data, specifically for non-alphanumeric characters (hebrew)
+library(ggplot2) # To plot
+library(RColorBrewer) # For colors
+library(leaflet) # For interactive map plots
+library(tidyverse) # For data manipulation
+library(reshape2)
+library(scales)
+library(MASS) # For model-fitting-related  operations
+library(glmnet) # For generalized linear model fitting
+library(glmnetUtils) # To allow us to cross-validate models according to both lambda and alpha parameters
+library(foreach) # To enable us to implement list comprehension as in python
+library(kableExtra) # For tables
+library(ggpubr)
+library(rsample) 
+library(matrixStats) # For matrix operations
+Sys.setlocale("LC_CTYPE", "hebrew")
+```
+
+### Section 1
+Our aim for this section is to create a graph that represents and opens up a possible discussion about the relationship between new_cases of the coronavirus in Israel from our data set with some selection of variables from our demographics data set.
+
+Here we open and read the data from both the data sets.
+```{r data, warning=FALSE, message=FALSE}
+# The coronavirus cases is already joined with our demographic data set (done independently) and split into train and test data sets
+cases_demog <- read_csv("train_cases_demographics.csv",locale=locale(date_names="he",encoding="UTF-8"))
+tester <- read_csv("test_features.csv",locale=locale(date_names="he",encoding="UTF-8"))
+
+```
+
+In this section we choose to pick 4 total variables: new_cases, town_east_coord & town_north_coord (coordinates of the towns/localities), and population. We will represent the data in an interactive map using the leaflet package, but to do so we must scale the coordinates of our data set to fit appropriately with the leaflet functions (did this by trial and error).
+```{r fig.align='center', dip=300}
+# Choosing the variables using dplyr's select() function, we also convert the variables into type numeric to be able to graph and manipulate them
+isr <- cases_demog %>% dplyr::select(town_east_coord,town_north_coord,new_cases,population) %>% mutate_all(as.numeric) 
+
+# Scaling the coordinates
+isr$town_east_coord <- isr$town_east_coord/11090+33.19  
+isr$town_north_coord <- isr$town_north_coord/11090+26.06
+
+# Choosing colors
+colorz <- colorRampPalette(c("#ffbf00","#ff0000"))(diff(range(isr$new_cases)))
+
+# Defining the text we will use in our graph using the columns from our dataframe
+isr <- isr %>% mutate(town=cases_demog$town_eng.y, town_code=cases_demog$town_code)
+mytext <- paste(
+   "Town: ", isr$town, "<br/>",
+   "Town Code: " , isr$town_code, "<br/>",
+   "Population: ", isr$population, "<br/>", 
+   "New Cases: ", isr$new_cases, sep="") %>%
+  lapply(htmltools::HTML)
+
+# Initiating the map using leaflet and adjusting it according to the appropriate parameters. We also choose to set markers for each of the bubbles with our previously defined text, and finally a legend for the severity of the new_cases.
+leaflet(isr) %>% addTiles() %>% setView(lat=31.4, lng=35.203072, zoom=7.3) %>% addProviderTiles("Esri.WorldGrayCanvas") %>%
+  addCircleMarkers(~town_east_coord, ~town_north_coord, fillColor=~colorz,label=mytext, 
+                   fillOpacity=1, color="white", radius=~population/5000, stroke=FALSE,
+                   labelOptions=labelOptions(style=list("font-weight"="normal",padding="3px 8px"),
+                                             textsize="13px",direction="auto")) %>%
+  addLegend(pal=colorNumeric(colorz, isr$new_cases),values=seq(length(colorz)),opacity=0.9, title="New Cases", position = "bottomright" )
+
+```
+
+Our final output is an interactive bubble map of the new cases in Israel (zoom-able too). The data that is used are the coordinates, the names of the towns, the town codes, their populations, and new cases. We have a legend to show the range of the colors, and the side of the points are determined by the size of the populations of the towns. Hovering over a point gives you all of the information. We can see that the cases hit certain areas more than others, as expected since the more populated areas and developed cities will have more movement. One interesting thing worth noting though is how the towns up north which have decently sized populations were not too infected. This suggests that the northern (and southern) towns probably had less in-and-out movement/travelers compared to the more central tows.
+
+### Section 2
+In this section we will implement a Ridge regression on our data manually to fit a model of a new_cases/population (the response variable) with various dependent variables of our choosing.
+##### a) Making Ridge Regression Function
+```{r 2A - Ridge Regression Function}
+# Making a function for fitting a Ridge regression on data as input according to a lambda parameter
+ridge <- function(train, lambda, s=F){
+  X <- if(s) scale(train[,2:dim(train)[2]]) else train[,2:dim(train)[2]]
+  solve(t(X)%*%X+lambda*diag(dim(X)[2]))%*%t(X)%*%as.vector(train[,1])
+}
+
+```
+
+##### b) Building Ridge Regression Model
+```{r 2B - Data Splitting Function, warning=FALSE, message=FALSE}
+# Function to replace missing values with the mean/median of the column
+missing_vals <- function(column){
+  ifelse(is.na(column),median(column,na.rm=T),column)
+}
+
+# Function to organize and convert the data into operable types, then clean and split the data into a train and validation data sets
+splitter <- function(data){
+  # Preparing Data, taking out unnecessary variables, calculating our response variable etc
+  data <- data %>% drop_na() %>%
+    mutate(y = new_cases/population) %>% # Defining our response var and leaving unwanted dependent vars
+    dplyr::select(-c(new_cases,population,agas_code,mahoz,town_eng.y,
+                     `...1`,town_code,town_north_coord,town_east_coord)) %>% 
+    dplyr::select(y, everything())
+  splits <- initial_split(data,prop=0.7,strata="town") # Another: data%>%group_by(town)%>%sample_frac(0.7)
+  trained <- training(splits) %>% dplyr::select(-town) %>% mutate_all(as.numeric) %>% drop_na()
+  tested <- testing(splits) %>% dplyr::select(-town) %>% mutate_all(as.numeric) %>% drop_na()
+  
+  list('train'=trained,'validation'=tested)
+}
+
+```
+
+To split the training data set into train + validation data sets, using my previous analysis from section 1, I wanted to keep in mind to sample towns from throughout its distribution. If I randomly sampled/split the data, since the more populated areas have the same town names and town-statistics, I wanted to ensure that I had sampled from every town/region. This is called stratified sampling, and in our case, with respect to the towns. I also disregarded the string variables and agas + town codes, and decided to keep all the other numerical variables to further in my analysis. I also took out NA values, which may make way for almost negligible bias, but it turned out that when I calculated the MSE, it was better this way than to replace the values with their means/medians. This is probably because this data set is large, however I will do it for the final testing data set in Question 3 because it is smaller so it won't affect as much and may prevent bias.
+
+```{r 2B - Regression and Model Optimization, fig.align="center", warning=FALSE, message=FALSE, dpi=300}
+ridge_data <- splitter(cases_demog) # Cleaning and splitting data according to our previously defined func.
+x_valid <- ridge_data$validation %>% dplyr::select(-y) # The x and y of the validation data sets
+y_valid <- ridge_data$validation %>% dplyr::select(y)
+trained <- ridge_data$train 
+
+lambdas <- round(10^seq(10, -3, length=100),3) # The lambdas we will use
+MSEs <- data.frame(MSE=as.numeric(),Lambda=as.numeric(),SD=as.numeric()) # Dataframe to store our data
+y_preds <- data.frame(seq(length(y_valid$y)))
+betas <- data.frame(seq(dim(trained)[2]-1))
+
+# A loop to iterate through all the lambdas and fit a ridge regression model of the data according to them.
+for(l in lambdas){
+  beta_l <- ridge(as.matrix(trained),l)
+  betas <- cbind(betas, beta_l)
+  
+  y_pred <- as.matrix(x_valid)%*%beta_l
+  y_preds <- cbind(y_preds, y_pred)
+  
+  MSE <- colMeans((y_valid-y_pred)^2)
+  MSEs <- rbind(MSEs, cbind('MSE'=MSE,'Lambda'=l))
+}
+colnames(y_preds) <- c('index',lambdas)
+colnames(betas) <- c('index',lambdas)
+
+# The optimal model chosen as the one with the minimum MSE (mean squared error)
+mins <- MSEs[which(MSEs$MSE==min(MSEs$MSE)),]
+mins
+
+# Plot the MSE as a function of log(lambda)
+ggplot(data=MSEs, aes(log(Lambda),MSE)) + geom_point()
+
+```
+The plot above illustrates the MSE (minimum square error) of each model as a function of log(lambda). We can choose the model and lambda according to the minimum MSE.
+
+Here we will show the aforermentioned optimal model (the coeffs according to the chosen lambda value).
+```{r 2B - Optimal Model and Fitted Values, warning=FALSE, message=FALSE}
+y_optimal <- y_preds %>% dplyr::select(paste(mins$Lambda))
+beta_optimal <- betas %>% dplyr::select(paste(mins$Lambda))
+round(beta_optimal,8)
+
+```
+
+I used the formulas defined from the mathematical definition of Ridge regression to not only calculate the Ridge regression, but also to predict the y response through the validation data set. I did this for multiple values of lambda ranging from 0.001 - 10^10 (split by 100 numbers). After doing so, I calculated the MSE for each and identified the model and predictions with the lowest score.
+
+##### 2c) Residual Plot of Our Model
+```{r 2C - Residual Plot, fig.align="center", warning=FALSE, message=FALSE, dpi=300}
+# Manually estimate residuals and store it in a dataframe with the predictions
+resids <- as.data.frame(y_valid - y_optimal) %>% cbind(y_optimal) 
+colnames(resids) <- c('residuals','fitted model')
+
+# Plot the residuals
+ggplot(resids,aes(`fitted model`,residuals)) + geom_point() + geom_smooth(method="lm",se=FALSE) + labs(title="Residual Plot of Optimal Model")
+
+```
+As expected, the abline of the residual plot resides on the 0, since their expectation is 0. Seeing as how many of the points on the left-half of the graph are close to the origin, but have the right-half more dispersed, this signifies some heteroscedasticity. This signifies that there are varying/differing variances among the features/explanatory variables.
+
+
+### Section 3
+In this section we will will fit models using cross-validation in accordance to the 'glmnet' package to estimate optimal parameters for lambda and alpha (so not necessarily ridge, but perhaps Lasso or ElasticNet).
+
+Here we split our data as we have done previously, implement our cross-validation and represent the results of the MSE of each model (for different alphas) as a function of log(lambda) in a plot.
+```{r 3, fig.align="center",warning=FALSE, message=FALSE, dpi=300}
+# Setting up the model for the whole train data set
+trainers <- cases_demog %>% na_if("..") %>%
+  dplyr::select(-c(agas_code,mahoz,town_eng.y,`...1`,town_code,town,town_north_coord,town_east_coord)) %>%
+  mutate_all(as.numeric) %>% mutate(y = new_cases/population) %>% dplyr::select(-c(new_cases,population))
+
+# We put in the mean/median for the NA values in the train data set
+trainers <- trainers %>% mutate(town_pop_denisty = missing_vals(town_pop_denisty),
+                                town_diabetes_rate = missing_vals(town_diabetes_rate),
+                                agas_socioeconomic_index = missing_vals(agas_socioeconomic_index))
+
+# Remove all the irrelevant variables from the testing data set
+testers <- tester %>% na_if("..") %>% 
+  dplyr::select(-c(population,agas_code,mahoz,town_eng.y,`...1`,town_code,town,town_north_coord,town_east_coord)) %>% mutate_all(as.numeric)
+
+# We put in the mean/median for the NA values in the test data set
+testers <- testers %>% mutate(town_pop_denisty = missing_vals(town_pop_denisty),
+                              town_diabetes_rate = missing_vals(town_diabetes_rate),
+                              agas_socioeconomic_index = missing_vals(agas_socioeconomic_index))
+
+# Cross validation of alphas and lambdas for training data, display results as MSE vs the log(lambda) in a plot for different alphas
+a <- round(seq(0,1,len=10)^3,3)
+fit.cva <- cva.glmnet(y~.,data=trainers, alpha=a)
+plot(fit.cva, main='train model')
+
+```
+
+We can see that for a certain lambda, the MSE becomes almost indistinguishable among certain values for alpha. Nevertheless, we can see that smaller values for alpha will probably provide a better model than those greater (according to the MSE).
+
+Let us create a table displaying all the parameters of the model(s) arranged by the best MSE value.
+```{r}
+# Now let us find all the optimal parameters which minimize the MSE
+MSEs <- unlist(foreach(z=fit.cva$modlist) %do% min(z$cvm)) # min(unlist(yay)) if we want min
+lambda.mins <- unlist(foreach(z=fit.cva$modlist) %do% min(z$lambda.min))
+lambda.1ses <- unlist(foreach(z=fit.cva$modlist) %do% min(z$lambda.1se))
+SE.mins <- unlist(foreach(z=fit.cva$modlist) %do% min(z$cvsd[z$lambda==z$lambda.min]))
+SE.1ses <- unlist(foreach(z=fit.cva$modlist) %do% min(z$cvsd[z$lambda==z$lambda.1se]))
+
+# Display all the results in a table
+estimates <- as.data.frame(cbind(a,MSEs,lambda.mins,lambda.1ses,SE.mins,SE.1ses))
+kbl(estimates %>% arrange(MSEs)) %>% kable_paper() %>% scroll_box(width = "100%", height = "200px")
+
+```
+
+The MSE of the optimal model (optimal alpha) as a function of log(lambda) with error bars.
+```{r, fig.align="center",warning=FALSE, message=FALSE, dpi=300}
+# Now let us find the optimal parameters which minimize the MSE and display the MSE vs log(lambda) with the standard error in a plot
+params1 <- estimates %>% dplyr::filter(MSEs == min(estimates$MSEs))
+plot(fit.cva$modlist[[which(a %in% params1$a)[[1]]]], main=str_c('training data, alpha:',params1$a))
+
+```
+We can represent the coefficients of the model in a plot to determine which are the mose influential features of the model. 
+```{r, fig.align="center", warning=FALSE, message=FALSE, dpi=300}
+features <- data.frame(coeffs=as.vector(coef(fit.cva, alpha=params1$a))[-c(1)], var=row.names(coef(fit.cva, alpha=params1$a))[-c(1)]) %>% arrange(desc(abs(coeffs))) 
+
+# Plot of the influence of the variables
+theme_set(theme_bw())
+ggplot(features, aes(x=coeffs, y=var, label=round(coeffs,2))) + 
+  geom_point(aes(color=coeffs),stat='identity', size=8)  +
+  scale_color_gradientn(colors = colorRampPalette(c("#eae22b", "#70dfa4"))(10)) + 
+  labs(title="Most Influential Features",subtitle=str_c("log(values), all variables")) 
+
+```
+We can see that town/agas_socioeconomic_index features are much more influential than the rest, while the coordinates,populations,and so on, are not. Using Ridge, it would have probably have gave coefficients to all of the variables, Lasso on the other hand can be known to over-regularize. This is why cross validating the alpha will tend to provide the most successful result when it comes to building the optimal model and predicting our data. Nevertheless, since we do not have the true y/response for the test data set, we will use our forecast/prediction from the Ridge model that we made in question 2 to help estimate the RMSPE. It should, in theory help provide us a somewhat relevant estimate of the true RMSPE. And this is precisely what we will do below.
+
+```{r}
+# Use the optimal parameters for choosing the optimal model and getting our forecast
+forecasted <- predict(fit.cva, newdata=as.matrix(testers), alpha=a)
+forecasted_train <- predict(fit.cva, newdata=as.matrix(trainers %>% dplyr::select(-y)), alpha=a)
+
+save(forecasted, file="forecast.Rdata")
+
+# The forecast of the Ridge model from Q2
+forecasted_ridge <- as.matrix(testers)%*%as.vector(beta_optimal[,1])
+
+# The RMSPEs
+RMSPE <- sqrt(mean((forecasted-forecasted_ridge)^2))
+
+RMSPE2 <- sqrt(sum((as.vector(trainers %>% dplyr::select(y))-forecasted_train)^2)/length(forecasted_train))
+
+print(paste("Estimated RMSPE of validation dataset: ",round(RMSPE2,3)))
+print(paste("Estimated RMSPE of test dataset: ",round(RMSPE,3)))
+
+```
+
+

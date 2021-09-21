@@ -4,6 +4,7 @@ This project aims to model and predict a response variable new_cases/population 
 
 ### Important notes
 The code related to the project is done in R, but saved in a .Rmd file. I attached an html knit of the code as well, however, the file is too big to preview on github. To remedy this, you can click on the html file, click on 'View raw', then copy and paste the URL of the raw version of the html on this site: https://htmlpreview.github.io/. This will enable you to view the results and the plots as well as the code. The code includes an interactive bubble map which is still omitted from the original html, but I have included a screenshot of the bubble map as a .png which I will also show below:
+![leaflet plot](https://user-images.githubusercontent.com/45203276/134150876-b548a64e-7a70-42db-af77-19a678199261.png)
 
 ### Further context
 This project is a part of a submission relating to my coursework in statistics in The Hebrew University of Jerusalem; the specific course in reference is 'Statistical Learning and Data Analysis' (52525). The data sets included in these analyses are the coronavirus cases from 24/12/2020-7/1/2020 in Israel by locality, as well as the demographic data of each locality; both of these data sets can be found on Israel's Ministry of Health website, I will include a link to the dashboard but keep in mind it can only be navigated in Hebrew: https://datadashboard.health.gov.il/COVID-19/general?utm_source=go.gov.il&utm_medium=referral. 
